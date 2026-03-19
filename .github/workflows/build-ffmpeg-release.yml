@@ -53,6 +53,7 @@ jobs:
                 make install
 
             - name: Write build info
+              shell: bash
               run: |
                 cat > BUILD_INFO.txt <<EOF
                 Upstream source: https://github.com/FFmpeg/FFmpeg/tree/release/${{ github.event.inputs.version }}
