@@ -1,0 +1,129 @@
+name: build-ffmpeg-release
+
+on:
+    workflow_dispatch:
+        inputs:
+            version:
+                description: "FFmpegのバージョン"
+                required: true
+                default: "8.1"
+
+permissions:
+    contents: write
+
+jobs:
+    build-windows-x64:
+        name: Build (windows-x64)
+        runs-on: windows-latest
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+              with:
+                fetch-depth: 1
+
+            - name: Checkout FFmpeg
+              uses: actions/checkout@v4
+              with:
+                repository: FFmpeg/FFmpeg
+                ref: release/${{ github.event.inputs.version }}
+                path: ffmpeg
+                fetch-depth: 1
+
+            - name: Setup MSYS2
+              uses: msys2/setup-msys2@v2
+              with:
+                msystem: MINGW64
+                update: true
+                install: >
+                    make
+                    pkgconf
+                    diffutils
+                    mingw-w64-x86_64-toolchain
+                    mingw-w64-x86_64-nasm
+                    mingw-w64-x86_64-yasm
+
+            - name: Build FFmpeg
+              shell: msys2 {0}
+              run: |
+                cd ffmpeg
+                mkdir -p build
+                ./configure --prefix=$PWD/build --disable-static --enable-shared
+                echo "--disable-static --enable-shared" > BUILD_CONFIG.txt
+                make -j$(nproc)
+                make install
+
+            - name: Write build info
+              run: |
+                cat > BUILD_INFO.txt <<EOF
+                Upstream source: https://github.com/FFmpeg/FFmpeg/tree/release/${{ github.event.inputs.version }}
+
+                Build on:
+                runner=${{ runner.os }} ${{ runner.arch }}
+                repo=${{ github.repository }}
+                run=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+                commit=${{ github.sha }}
+                EOF
+
+            - name: Package artifacts
+              shell: pwsh
+              run: |
+                mkdir -p artifacts/ffmpeg-${{ github.event.inputs.version }}-windows-x64
+                cp ffmpeg/build/bin/* artifacts/ffmpeg-${{ github.event.inputs.version }}-windows-x64/
+                cp BUILD_INFO.txt artifacts/ffmpeg-${{ github.event.inputs.version }}-windows-x64/
+                powershell Compress-Archive -Path 'artifacts/ffmpeg-${{ github.event.inputs.version }}-windows-x64/*' -DestinationPath 'artifacts/ffmpeg-${{ github.event.inputs.version }}-windows-x64.zip'
+
+            - name: Upload artifact
+              uses: actions/upload-artifact@v4
+              with:
+                name: ffmpeg-${{ github.event.inputs.version }}-windows-x64.zip
+                path: artifacts/ffmpeg-${{ github.event.inputs.version }}-windows-x64.zip
+
+    release:
+        needs: build-windows-x64
+        name: Create GitHub Release
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+
+        steps:
+            - name: Download release asset
+              uses: actions/download-artifact@v4
+              with:
+                name: ffmpeg-${{ github.event.inputs.version }}-windows-x64.zip
+                path: artifacts/
+
+            - name: Checkout FFmpeg
+              uses: actions/checkout@v4
+              with:
+                repository: FFmpeg/FFmpeg
+                ref: release/${{ github.event.inputs.version }}
+                path: ffmpeg
+                fetch-depth: 1
+
+            - name: Create version info
+              run: |
+                echo "FFmpeg version: ${{ github.event.inputs.version }}" > VERSION_INFO.txt
+                echo "Source: https://github.com/FFmpeg/FFmpeg/tree/release/${{ github.event.inputs.version }}" >> VERSION_INFO.txt
+
+            - name: Package sources
+              run: |
+                mkdir -p ffmpeg-${{ github.event.inputs.version }}-sources
+                cp -r ffmpeg/* ffmpeg-${{ github.event.inputs.version }}-sources/
+                zip -r ffmpeg-${{ github.event.inputs.version }}-sources.zip ffmpeg-${{ github.event.inputs.version }}-sources
+
+            - name: Move release asset
+              shell: bash
+              run: |
+                mkdir -p upload
+                mv artifacts/ffmpeg-${{ github.event.inputs.version }}-windows-x64.zip upload/
+                mv ffmpeg-${{ github.event.inputs.version }}-sources.zip upload/
+            
+            - name: Create GitHub Release
+              uses: softprops/action-gh-release@v2
+              with:
+                tag_name: v${{ github.event.inputs.version }}
+                name: FFmpeg ${{ github.event.inputs.version }}
+                body: |
+                  このビルドで用いられているFFmpegは、LGPL v2.1でライセンスされています。
+                  ソースコードは ffmpeg-${{ github.event.inputs.version }}-sources.zip に含まれています。
+                files: upload/*.zip
